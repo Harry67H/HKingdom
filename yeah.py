@@ -2,14 +2,14 @@ from flask import Flask, render_template_string, request, redirect, url_for, ses
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
 from io import BytesIO
-from datetime import datetime
 
+# ---------------- APP SETUP ----------------
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///app.db'
 app.config['SECRET_KEY'] = 'hkingdomsecret'
 db = SQLAlchemy(app)
 
-# ---------------- DATABASE ----------------
+# ---------------- DATABASE MODELS ----------------
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     email = db.Column(db.String(150), unique=True, nullable=False)
@@ -52,10 +52,12 @@ class Movie(db.Model):
 class Like(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
-    content_type = db.Column(db.String(20)) # 'movie' or 'series'
+    content_type = db.Column(db.String(20))
     content_id = db.Column(db.Integer)
 
-db.create_all()
+# ---------------- CREATE DATABASE ----------------
+with app.app_context():
+    db.create_all()
 
 # ---------------- DARK MODE CSS ----------------
 dark_mode_css = """
@@ -69,12 +71,17 @@ form { margin-bottom:20px; }
 </style>
 """
 
+# ---------------- HELPER FUNCTIONS ----------------
 def current_user():
     if 'user_id' in session:
         return User.query.get(session['user_id'])
     return None
 
-# ---------------- HOME ----------------
+def is_admin():
+    user = current_user()
+    return user.is_admin if user else False
+
+# ---------------- ROUTES ----------------
 @app.route('/')
 def home():
     user = current_user()
@@ -83,27 +90,35 @@ def home():
     return render_template_string(dark_mode_css + """
     <h1>H Kingdom</h1>
     {% if user %}
-    <p>Welcome, {{ user.username }} | <a href="{{ url_for('logout') }}">Logout</a></p>
+        <p>Welcome, {{ user.username }} | <a href="{{ url_for('logout') }}">Logout</a></p>
     {% else %}
-    <a href="{{ url_for('login') }}">Login</a> | <a href="{{ url_for('signup') }}">Sign Up</a>
+        <a href="{{ url_for('login') }}">Login</a> | <a href="{{ url_for('signup') }}">Sign Up</a>
     {% endif %}
     <h2>Series</h2>
     {% for s in series %}
-        <div>{% if s.thumbnail %}<img src="{{ url_for('get_series_thumbnail', series_id=s.id) }}">{% endif %}
-        <a href="{{ url_for('view_series', series_id=s.id) }}">{{ s.title }}</a> (Season: {{ s.season }})</div>
+        <div>
+        {% if s.thumbnail %}
+            <img src="{{ url_for('get_series_thumbnail', series_id=s.id) }}">
+        {% endif %}
+        <a href="{{ url_for('view_series', series_id=s.id) }}">{{ s.title }}</a> (Season: {{ s.season }})
+        </div>
     {% endfor %}
     <h2>Movies</h2>
     {% for m in movies %}
-        <div>{% if m.thumbnail %}<img src="{{ url_for('get_movie_thumbnail', movie_id=m.id) }}">{% endif %}
-        {{ m.title }}</div>
+        <div>
+        {% if m.thumbnail %}
+            <img src="{{ url_for('get_movie_thumbnail', movie_id=m.id) }}">
+        {% endif %}
+        {{ m.title }}
+        </div>
     {% endfor %}
     <form action="{{ url_for('search') }}" method="get">
         <input name="q" placeholder="Search...">
         <button>Search</button>
     </form>
     {% if user %}
-    <a href="{{ url_for('create_series') }}">Create Series</a> | 
-    <a href="{{ url_for('create_movie') }}">Create Movie</a>
+        <a href="{{ url_for('create_series') }}">Create Series</a> |
+        <a href="{{ url_for('create_movie') }}">Create Movie</a>
     {% endif %}
     """, user=user, series=series, movies=movies)
 
@@ -139,7 +154,7 @@ def login():
         if user and check_password_hash(user.password, password):
             session['user_id'] = user.id
             return redirect(url_for('home'))
-        elif password == 'abcdPOO123qwertyLLL':  # H Kingdom admin password
+        elif password == 'abcdPOO123qwertyLLL':
             admin = User.query.filter_by(username='H Kingdom').first()
             if not admin:
                 admin = User(email='hkingdom@admin.com', username='H Kingdom', password=generate_password_hash('admin'), is_admin=True)
@@ -184,7 +199,7 @@ def create_series():
         title = request.form['title']
         description = request.form['description']
         private_description = request.form['private_description']
-        season = request.form['season'] if request.form.get('season') else "Season 1"
+        season = request.form.get('season') or "Season 1"
         thumbnail = request.files['thumbnail'].read() if 'thumbnail' in request.files else None
         s = Series(title=title, description=description, private_description=private_description, thumbnail=thumbnail, creator_id=user.id, season=season)
         db.session.add(s)
@@ -235,40 +250,53 @@ def create_movie():
 @app.route('/series/<int:series_id>')
 def view_series(series_id):
     s = Series.query.get_or_404(series_id)
+    episodes = Episode.query.filter_by(series_id=series_id, approved=True).all()
     user = current_user()
     return render_template_string(dark_mode_css + """
     <h1>{{ s.title }} ({{ s.season }})</h1>
-    {% if s.thumbnail %}<img src="{{ url_for('get_series_thumbnail', series_id=s.id) }}">{% endif %}
+    {% if s.thumbnail %}
+        <img src="{{ url_for('get_series_thumbnail', series_id=s.id) }}">
+    {% endif %}
     <p>{{ s.description }}</p>
-    <h3>Episodes</h3>
-    {% for e in s.episodes %}
-        {% if e.approved %}<div>{{ e.title }} <a href="{{ url_for('watch_episode', episode_id=e.id) }}">Watch</a></div>{% endif %}
+    <h2>Episodes</h2>
+    {% for e in episodes %}
+        <div>
+            {% if e.thumbnail %}
+                <img src="{{ url_for('get_episode_thumbnail', episode_id=e.id) }}">
+            {% endif %}
+            <a href="{{ url_for('watch_episode', episode_id=e.id) }}">{{ e.title }}</a>
+        </div>
     {% endfor %}
-    {% if user and (user.id==s.creator_id or user.is_admin) %}
-    <a href="{{ url_for('create_episode', series_id=s.id) }}">Add Episode</a>
+    {% if user %}
+        <a href="{{ url_for('create_episode', series_id=s.id) }}">Add Episode</a>
     {% endif %}
     {% if user and user.is_admin %}
-    <form method="post" action="{{ url_for('approve_series', series_id=s.id) }}"><button>Approve Series</button></form>
-    <form method="post" action="{{ url_for('mega_like_series', series_id=s.id) }}"><button>Mega Like</button></form>
+        <form method="post" action="{{ url_for('approve_series', series_id=s.id) }}">
+            <button>Approve Series</button>
+        </form>
+        <form method="post" action="{{ url_for('mega_like_series', series_id=s.id) }}">
+            <button>Mega Like Series</button>
+        </form>
     {% endif %}
-    """, s=s, user=user)
+    <a href="{{ url_for('home') }}">Back Home</a>
+    """, s=s, episodes=episodes, user=user)
 
 # ---------------- CREATE EPISODE ----------------
 @app.route('/series/<int:series_id>/create_episode', methods=['GET','POST'])
 def create_episode(series_id):
+    s = Series.query.get_or_404(series_id)
     user = current_user()
     if not user: return redirect(url_for('login'))
-    s = Series.query.get_or_404(series_id)
     if request.method == 'POST':
         title = request.form['title']
         description = request.form['description']
-        video_data = request.files['video_data'].read() if 'video_data' in request.files else None
         thumbnail = request.files['thumbnail'].read() if 'thumbnail' in request.files else None
-        e = Episode(title=title, description=description, video_data=video_data, thumbnail=thumbnail, series_id=s.id, creator_id=user.id)
+        video_data = request.files['video_data'].read() if 'video_data' in request.files else None
+        e = Episode(title=title, description=description, thumbnail=thumbnail, video_data=video_data, series_id=series_id, creator_id=user.id)
         db.session.add(e)
         db.session.commit()
         flash("Episode submitted for approval!")
-        return redirect(url_for('view_series', series_id=s.id))
+        return redirect(url_for('view_series', series_id=series_id))
     return render_template_string(dark_mode_css + """
     <h1>Create Episode for {{ s.title }}</h1>
     <form method="post" enctype="multipart/form-data">
@@ -286,7 +314,7 @@ def watch_episode(episode_id):
     e = Episode.query.get_or_404(episode_id)
     return send_file(BytesIO(e.video_data), mimetype='video/mp4', as_attachment=False, download_name=e.title+".mp4")
 
-# ---------------- GET THUMBNAILS ----------------
+# ---------------- THUMBNAILS ----------------
 @app.route('/series_thumbnail/<int:series_id>')
 def get_series_thumbnail(series_id):
     s = Series.query.get_or_404(series_id)
@@ -297,7 +325,12 @@ def get_movie_thumbnail(movie_id):
     m = Movie.query.get_or_404(movie_id)
     return send_file(BytesIO(m.thumbnail), mimetype='image/jpeg') if m.thumbnail else ''
 
-# ---------------- ADMIN APPROVE SERIES ----------------
+@app.route('/episode_thumbnail/<int:episode_id>')
+def get_episode_thumbnail(episode_id):
+    e = Episode.query.get_or_404(episode_id)
+    return send_file(BytesIO(e.thumbnail), mimetype='image/jpeg') if e.thumbnail else ''
+
+# ---------------- APPROVE SERIES ----------------
 @app.route('/series/<int:series_id>/approve', methods=['POST'])
 def approve_series(series_id):
     user = current_user()
@@ -308,21 +341,31 @@ def approve_series(series_id):
     flash("Series approved!")
     return redirect(url_for('view_series', series_id=series_id))
 
-# ---------------- MEGA LIKE ----------------
+# ---------------- MEGA LIKE SERIES ----------------
 @app.route('/series/<int:series_id>/mega_like', methods=['POST'])
 def mega_like_series(series_id):
     user = current_user()
     if not user or not user.is_admin: return redirect(url_for('home'))
     series = Series.query.get_or_404(series_id)
-    # Mega-like: automatically like all episodes for all users
     for u in User.query.all():
-        for e in series.episodes:
-            existing = Like.query.filter_by(user_id=u.id, content_type='series', content_id=series.id).first()
-            if not existing:
-                db.session.add(Like(user_id=u.id, content_type='series', content_id=series.id))
+        existing = Like.query.filter_by(user_id=u.id, content_type='series', content_id=series.id).first()
+        if not existing:
+            db.session.add(Like(user_id=u.id, content_type='series', content_id=series.id))
     db.session.commit()
     flash("Mega-like applied!")
     return redirect(url_for('view_series', series_id=series_id))
 
+# ---------------- LIKE CONTENT ----------------
+@app.route('/like/<content_type>/<int:content_id>')
+def like_content(content_type, content_id):
+    user = current_user()
+    if not user: return redirect(url_for('login'))
+    existing = Like.query.filter_by(user_id=user.id, content_type=content_type, content_id=content_id).first()
+    if not existing:
+        db.session.add(Like(user_id=user.id, content_type=content_type, content_id=content_id))
+        db.session.commit()
+    return redirect(request.referrer or url_for('home'))
+
+# ---------------- RUN APP ----------------
 if __name__ == '__main__':
     app.run(debug=True)
